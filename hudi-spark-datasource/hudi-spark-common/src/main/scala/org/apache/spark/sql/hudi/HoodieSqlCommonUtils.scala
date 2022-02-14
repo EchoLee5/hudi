@@ -19,6 +19,7 @@ package org.apache.spark.sql.hudi
 
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.Path
+
 import org.apache.hudi.client.common.HoodieSparkEngineContext
 import org.apache.hudi.common.config.{DFSPropertiesConfiguration, HoodieMetadataConfig}
 import org.apache.hudi.common.fs.FSUtils
@@ -26,9 +27,10 @@ import org.apache.hudi.common.model.HoodieRecord
 import org.apache.hudi.common.table.timeline.{HoodieActiveTimeline, HoodieInstantTimeGenerator}
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.{AvroConversionUtils, SparkAdapterSupport}
+
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.catalyst.TableIdentifier
-import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
+import org.apache.spark.sql.catalyst.analysis.{Resolver, UnresolvedRelation}
 import org.apache.spark.sql.catalyst.catalog.{CatalogTable, CatalogTableType}
 import org.apache.spark.sql.catalyst.expressions.{And, Attribute, Expression}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, SubqueryAlias}
@@ -40,6 +42,7 @@ import org.apache.spark.sql.{Column, DataFrame, SparkSession}
 import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.{Locale, Properties}
+
 import scala.collection.JavaConverters._
 import scala.collection.immutable.Map
 
@@ -198,10 +201,8 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
   }
 
   def getTableLocation(table: CatalogTable, sparkSession: SparkSession): String = {
-    val uri = if (table.tableType == CatalogTableType.MANAGED && isHoodieTable(table)) {
+    val uri = table.storage.locationUri.orElse {
       Some(sparkSession.sessionState.catalog.defaultTablePath(table.identifier))
-    } else {
-      table.storage.locationUri
     }
     val conf = sparkSession.sessionState.newHadoopConf()
     uri.map(makePathQualified(_, conf))
@@ -300,5 +301,19 @@ object HoodieSqlCommonUtils extends SparkAdapterSupport {
     } else {
       true
     }
+  }
+
+  // Find the origin column from schema by column name, throw an AnalysisException if the column
+  // reference is invalid.
+  def findColumnByName(schema: StructType, name: String, resolver: Resolver):Option[StructField] = {
+    schema.fields.collectFirst {
+      case field if resolver(field.name, name) => field
+    }
+  }
+
+  // Compare a [[StructField]] to another, return true if they have the same column
+  // name(by resolver) and dataType.
+  def columnEqual(field: StructField, other: StructField, resolver: Resolver): Boolean = {
+    resolver(field.name, other.name) && field.dataType == other.dataType
   }
 }

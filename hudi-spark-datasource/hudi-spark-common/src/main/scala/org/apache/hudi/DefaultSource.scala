@@ -108,31 +108,35 @@ class DefaultSource extends RelationProvider
     val isBootstrappedTable = metaClient.getTableConfig.getBootstrapBasePath.isPresent
     val tableType = metaClient.getTableType
     val queryType = parameters(QUERY_TYPE.key)
+    val userSchema = if (schema == null) Option.empty[StructType] else Some(schema)
 
     log.info(s"Is bootstrapped table => $isBootstrappedTable, tableType is: $tableType, queryType is: $queryType")
+    if (metaClient.getCommitsTimeline.filterCompletedInstants.countInstants() == 0) {
+      new EmptyRelation(sqlContext, metaClient)
+    } else {
+      (tableType, queryType, isBootstrappedTable) match {
+        case (COPY_ON_WRITE, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) |
+             (COPY_ON_WRITE, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) |
+             (MERGE_ON_READ, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) =>
+          getBaseFileOnlyView(useHoodieFileIndex, sqlContext, parameters, userSchema, tablePath,
+            readPaths, metaClient)
 
-    (tableType, queryType, isBootstrappedTable) match {
-      case (COPY_ON_WRITE, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) |
-           (COPY_ON_WRITE, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) |
-           (MERGE_ON_READ, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) =>
-        getBaseFileOnlyView(useHoodieFileIndex, sqlContext, parameters, schema, tablePath,
-          readPaths, metaClient)
+        case (COPY_ON_WRITE, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
+          new IncrementalRelation(sqlContext, parameters, userSchema, metaClient)
 
-      case (COPY_ON_WRITE, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
-        new IncrementalRelation(sqlContext, parameters, schema, metaClient)
+        case (MERGE_ON_READ, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) =>
+          new MergeOnReadSnapshotRelation(sqlContext, parameters, userSchema, globPaths, metaClient)
 
-      case (MERGE_ON_READ, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) =>
-        new MergeOnReadSnapshotRelation(sqlContext, parameters, schema, globPaths, metaClient)
+        case (MERGE_ON_READ, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
+          new MergeOnReadIncrementalRelation(sqlContext, parameters, userSchema, metaClient)
 
-      case (MERGE_ON_READ, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
-        new MergeOnReadIncrementalRelation(sqlContext, parameters, schema, metaClient)
+        case (_, _, true) =>
+          new HoodieBootstrapRelation(sqlContext, userSchema, globPaths, metaClient, parameters)
 
-      case (_, _, true) =>
-        new HoodieBootstrapRelation(sqlContext, schema, globPaths, metaClient, parameters)
-
-      case (_, _, _) =>
-        throw new HoodieException(s"Invalid query type : $queryType for tableType: $tableType," +
-          s"isBootstrappedTable: $isBootstrappedTable ")
+        case (_, _, _) =>
+          throw new HoodieException(s"Invalid query type : $queryType for tableType: $tableType," +
+            s"isBootstrappedTable: $isBootstrappedTable ")
+      }
     }
   }
 
@@ -182,7 +186,7 @@ class DefaultSource extends RelationProvider
   private def getBaseFileOnlyView(useHoodieFileIndex: Boolean,
                                   sqlContext: SQLContext,
                                   optParams: Map[String, String],
-                                  schema: StructType,
+                                  schema: Option[StructType],
                                   tablePath: String,
                                   extraReadPaths: Seq[String],
                                   metaClient: HoodieTableMetaClient): BaseRelation = {
@@ -193,17 +197,7 @@ class DefaultSource extends RelationProvider
     }
 
     if (useHoodieFileIndex) {
-      val fileIndex = HoodieFileIndex(sqlContext.sparkSession, metaClient,
-        if (schema == null) Option.empty[StructType] else Some(schema),
-        optParams, FileStatusCache.getOrCreate(sqlContext.sparkSession))
-
-      HadoopFsRelation(
-        fileIndex,
-        fileIndex.partitionSchema,
-        fileIndex.dataSchema,
-        bucketSpec = None,
-        fileFormat = tableFileFormat,
-        optParams)(sqlContext.sparkSession)
+      new BaseFileOnlyViewRelation(sqlContext, metaClient, optParams, schema)
     } else {
       // this is just effectively RO view only, where `path` can contain a mix of
       // non-hoodie/hoodie path files. set the path filter up
@@ -212,7 +206,7 @@ class DefaultSource extends RelationProvider
         classOf[HoodieROTablePathFilter],
         classOf[org.apache.hadoop.fs.PathFilter])
 
-      val specifySchema = if (schema == null) {
+      val specifySchema = if (schema.isEmpty) {
         // Load the schema from the commit meta data.
         // Here we should specify the schema to the latest commit schema since
         // the table schema evolution.
@@ -225,7 +219,7 @@ class DefaultSource extends RelationProvider
                  // with tableSchemaResolver, return None here.
         }
       } else {
-        Some(schema)
+        schema
       }
       // simply return as a regular relation
       DataSource.apply(
