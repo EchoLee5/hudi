@@ -38,7 +38,6 @@ import org.apache.spark.sql.types.{StringType, StructField, StructType}
 import org.apache.spark.unsafe.types.UTF8String
 
 import scala.collection.JavaConverters._
-import scala.language.implicitConversions
 
 /**
  * Implementation of the [[BaseHoodieTableFileIndex]] for Spark
@@ -64,6 +63,7 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
     deduceQueryType(configProperties),
     queryPaths.asJava,
     toJavaOption(specifiedQueryInstant),
+    false,
     false,
     SparkHoodieTableFileIndex.adapt(fileStatusCache)
   )
@@ -134,15 +134,27 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
    * Fetch list of latest base files w/ corresponding log files, after performing
    * partition pruning
    *
+   * TODO unify w/ HoodieFileIndex#listFiles
+   *
    * @param partitionFilters partition column filters
    * @return mapping from string partition paths to its base/log files
    */
   def listFileSlices(partitionFilters: Seq[Expression]): Map[String, Seq[FileSlice]] = {
     // Prune the partition path by the partition filters
-    val prunedPartitions = prunePartition(cachedAllInputFileSlices.asScala.keys.toSeq, partitionFilters)
+    val prunedPartitions = prunePartition(cachedAllInputFileSlices.keySet().asScala.toSeq, partitionFilters)
     prunedPartitions.map(partition => {
       (partition.path, cachedAllInputFileSlices.get(partition).asScala)
     }).toMap
+  }
+
+  /**
+   * Get all the cached partition paths pruned by the filter.
+   *
+   * @param predicates The filter condition
+   * @return The pruned partition paths
+   */
+  def getPartitionPaths(predicates: Seq[Expression]): Seq[PartitionPath] = {
+    prunePartition(cachedAllInputFileSlices.keySet().asScala.toSeq, predicates)
   }
 
   /**
@@ -151,9 +163,9 @@ class SparkHoodieTableFileIndex(spark: SparkSession,
    *
    * @param partitionPaths All the partition paths.
    * @param predicates     The filter condition.
-   * @return The Pruned partition paths.
+   * @return The pruned partition paths.
    */
-  def prunePartition(partitionPaths: Seq[PartitionPath], predicates: Seq[Expression]): Seq[PartitionPath] = {
+  protected def prunePartition(partitionPaths: Seq[PartitionPath], predicates: Seq[Expression]): Seq[PartitionPath] = {
     val partitionColumnNames = partitionSchema.fields.map(_.name).toSet
     val partitionPruningPredicates = predicates.filter {
       _.references.map(_.name).toSet.subsetOf(partitionColumnNames)
@@ -296,7 +308,7 @@ object SparkHoodieTableFileIndex {
   }
 
   private def deduceQueryType(configProperties: TypedProperties): HoodieTableQueryType = {
-    configProperties.asScala(QUERY_TYPE.key()) match {
+    configProperties.asScala.getOrElse(QUERY_TYPE.key, QUERY_TYPE.defaultValue) match {
       case QUERY_TYPE_SNAPSHOT_OPT_VAL => HoodieTableQueryType.SNAPSHOT
       case QUERY_TYPE_INCREMENTAL_OPT_VAL => HoodieTableQueryType.INCREMENTAL
       case QUERY_TYPE_READ_OPTIMIZED_OPT_VAL => HoodieTableQueryType.READ_OPTIMIZED

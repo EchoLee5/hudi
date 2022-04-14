@@ -227,6 +227,10 @@ public abstract class HoodieWriteHandle<T extends HoodieRecordPayload, I, K, O> 
     return HoodieAvroUtils.rewriteRecord(record, writeSchemaWithMetaFields);
   }
 
+  protected GenericRecord rewriteRecordWithMetadata(GenericRecord record, String fileName) {
+    return HoodieAvroUtils.rewriteRecordWithMetadata(record, writeSchemaWithMetaFields, fileName);
+  }
+
   public abstract List<WriteStatus> close();
 
   public List<WriteStatus> writeStatuses() {

@@ -18,21 +18,15 @@
 package org.apache.hudi
 
 import org.apache.hadoop.fs.Path
-
 import org.apache.hudi.DataSourceReadOptions._
-import org.apache.hudi.common.model.{HoodieFileFormat, HoodieRecord}
 import org.apache.hudi.DataSourceWriteOptions.{BOOTSTRAP_OPERATION_OPT_VAL, OPERATION}
 import org.apache.hudi.common.fs.FSUtils
+import org.apache.hudi.common.model.{HoodieFileFormat, HoodieRecord}
 import org.apache.hudi.common.model.HoodieTableType.{COPY_ON_WRITE, MERGE_ON_READ}
+import org.apache.hudi.common.table.timeline.HoodieInstant
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.exception.HoodieException
-import org.apache.hudi.hadoop.HoodieROTablePathFilter
-
 import org.apache.log4j.LogManager
-
-import org.apache.spark.sql.execution.datasources.{DataSource, FileStatusCache, HadoopFsRelation}
-import org.apache.spark.sql.execution.datasources.orc.OrcFileFormat
-import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.execution.streaming.{Sink, Source}
 import org.apache.spark.sql.hudi.streaming.HoodieStreamSource
 import org.apache.spark.sql.sources._
@@ -52,6 +46,7 @@ class DefaultSource extends RelationProvider
   with DataSourceRegister
   with StreamSinkProvider
   with StreamSourceProvider
+  with SparkAdapterSupport
   with Serializable {
 
   SparkSession.getActiveSession.foreach { spark =>
@@ -85,20 +80,15 @@ class DefaultSource extends RelationProvider
     val allPaths = path.map(p => Seq(p)).getOrElse(Seq()) ++ readPaths
 
     val fs = FSUtils.getFs(allPaths.head, sqlContext.sparkContext.hadoopConfiguration)
-    // Use the HoodieFileIndex only if the 'path' is not globbed.
-    // Or else we use the original way to read hoodie table.
-    val enableFileIndex = optParams.get(ENABLE_HOODIE_FILE_INDEX.key)
-      .map(_.toBoolean).getOrElse(ENABLE_HOODIE_FILE_INDEX.defaultValue)
-    val useHoodieFileIndex = enableFileIndex && path.isDefined && !path.get.contains("*") &&
-      !parameters.contains(DataSourceReadOptions.READ_PATHS.key)
-    val globPaths = if (useHoodieFileIndex) {
-      None
+
+    val globPaths = if (path.exists(_.contains("*")) || readPaths.nonEmpty) {
+      HoodieSparkUtils.checkAndGlobPathIfNecessary(allPaths, fs)
     } else {
-      Some(HoodieSparkUtils.checkAndGlobPathIfNecessary(allPaths, fs))
+      Seq.empty
     }
     // Get the table base path
-    val tablePath = if (globPaths.isDefined) {
-      DataSourceUtils.getTablePath(fs, globPaths.get.toArray)
+    val tablePath = if (globPaths.nonEmpty) {
+      DataSourceUtils.getTablePath(fs, globPaths.toArray)
     } else {
       DataSourceUtils.getTablePath(fs, Array(new Path(path.get)))
     }
@@ -118,9 +108,7 @@ class DefaultSource extends RelationProvider
         case (COPY_ON_WRITE, QUERY_TYPE_SNAPSHOT_OPT_VAL, false) |
              (COPY_ON_WRITE, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) |
              (MERGE_ON_READ, QUERY_TYPE_READ_OPTIMIZED_OPT_VAL, false) =>
-          getBaseFileOnlyView(useHoodieFileIndex, sqlContext, parameters, userSchema, tablePath,
-            readPaths, metaClient)
-
+          new BaseFileOnlyRelation(sqlContext, metaClient, parameters, userSchema, globPaths)
         case (COPY_ON_WRITE, QUERY_TYPE_INCREMENTAL_OPT_VAL, _) =>
           new IncrementalRelation(sqlContext, parameters, userSchema, metaClient)
 
@@ -138,6 +126,11 @@ class DefaultSource extends RelationProvider
             s"isBootstrappedTable: $isBootstrappedTable ")
       }
     }
+  }
+
+  def getValidCommits(metaClient: HoodieTableMetaClient): String = {
+    metaClient
+      .getCommitsAndCompactionTimeline.filterCompletedInstants.getInstants.toArray().map(_.asInstanceOf[HoodieInstant].getFileName).mkString(",")
   }
 
   /**
@@ -182,55 +175,6 @@ class DefaultSource extends RelationProvider
   }
 
   override def shortName(): String = "hudi_v1"
-
-  private def getBaseFileOnlyView(useHoodieFileIndex: Boolean,
-                                  sqlContext: SQLContext,
-                                  optParams: Map[String, String],
-                                  schema: Option[StructType],
-                                  tablePath: String,
-                                  extraReadPaths: Seq[String],
-                                  metaClient: HoodieTableMetaClient): BaseRelation = {
-    log.info("Loading Base File Only View  with options :" + optParams)
-    val (tableFileFormat, formatClassName) = metaClient.getTableConfig.getBaseFileFormat match {
-      case HoodieFileFormat.PARQUET => (new ParquetFileFormat, "parquet")
-      case HoodieFileFormat.ORC => (new OrcFileFormat, "orc")
-    }
-
-    if (useHoodieFileIndex) {
-      new BaseFileOnlyViewRelation(sqlContext, metaClient, optParams, schema)
-    } else {
-      // this is just effectively RO view only, where `path` can contain a mix of
-      // non-hoodie/hoodie path files. set the path filter up
-      sqlContext.sparkContext.hadoopConfiguration.setClass(
-        "mapreduce.input.pathFilter.class",
-        classOf[HoodieROTablePathFilter],
-        classOf[org.apache.hadoop.fs.PathFilter])
-
-      val specifySchema = if (schema.isEmpty) {
-        // Load the schema from the commit meta data.
-        // Here we should specify the schema to the latest commit schema since
-        // the table schema evolution.
-        val tableSchemaResolver = new TableSchemaResolver(metaClient)
-        try {
-          Some(AvroConversionUtils.convertAvroSchemaToStructType(tableSchemaResolver.getTableAvroSchema))
-        } catch {
-          case _: Throwable =>
-            None // If there is no commit in the table, we can not get the schema
-                 // with tableSchemaResolver, return None here.
-        }
-      } else {
-        schema
-      }
-      // simply return as a regular relation
-      DataSource.apply(
-        sparkSession = sqlContext.sparkSession,
-        paths = extraReadPaths,
-        userSpecifiedSchema = specifySchema,
-        className = formatClassName,
-        options = optParams)
-        .resolveRelation()
-    }
-  }
 
   override def sourceSchema(sqlContext: SQLContext,
                             schema: Option[StructType],

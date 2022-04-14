@@ -31,6 +31,7 @@ import org.apache.hudi.exception.HoodieNotSupportedException;
 import org.apache.hudi.table.action.cluster.ClusteringPlanPartitionFilterMode;
 
 import javax.annotation.Nonnull;
+
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
@@ -94,6 +95,12 @@ public class HoodieClusteringConfig extends HoodieConfig {
       .sinceVersion("0.11.0")
       .withDocumentation("Filter clustering partitions that matched regex pattern");
 
+  public static final ConfigProperty<String> PARTITION_SELECTED = ConfigProperty
+      .key(CLUSTERING_STRATEGY_PARAM_PREFIX + "partition.selected")
+      .noDefaultValue()
+      .sinceVersion("0.11.0")
+      .withDocumentation("Partitions to run clustering");
+
   public static final ConfigProperty<String> PLAN_STRATEGY_CLASS_NAME = ConfigProperty
       .key("hoodie.clustering.plan.strategy.class")
       .defaultValue(SPARK_SIZED_BASED_CLUSTERING_PLAN_STRATEGY)
@@ -114,7 +121,8 @@ public class HoodieClusteringConfig extends HoodieConfig {
       .key("hoodie.clustering.inline")
       .defaultValue("false")
       .sinceVersion("0.7.0")
-      .withDocumentation("Turn on inline clustering - clustering will be run after each write operation is complete");
+      .withDocumentation("Turn on inline clustering - clustering will be run after each write operation is complete")
+      .withAlternatives("hoodie.datasource.clustering.inline.enable");
 
   public static final ConfigProperty<String> INLINE_CLUSTERING_MAX_COMMITS = ConfigProperty
       .key("hoodie.clustering.inline.max.commits")
@@ -192,7 +200,8 @@ public class HoodieClusteringConfig extends HoodieConfig {
       .key("hoodie.clustering.async.enabled")
       .defaultValue("false")
       .sinceVersion("0.7.0")
-      .withDocumentation("Enable running of clustering service, asynchronously as inserts happen on the table.");
+      .withDocumentation("Enable running of clustering service, asynchronously as inserts happen on the table.")
+      .withAlternatives("hoodie.datasource.clustering.async.enable");
 
   public static final ConfigProperty<Boolean> PRESERVE_COMMIT_METADATA = ConfigProperty
       .key("hoodie.clustering.preserve.commit.metadata")
@@ -468,6 +477,11 @@ public class HoodieClusteringConfig extends HoodieConfig {
 
     public Builder withClusteringPartitionRegexPattern(String pattern) {
       clusteringConfig.setValue(PARTITION_REGEX_PATTERN, pattern);
+      return this;
+    }
+
+    public Builder withClusteringPartitionSelected(String partitionSelected) {
+      clusteringConfig.setValue(PARTITION_SELECTED, partitionSelected);
       return this;
     }
 
